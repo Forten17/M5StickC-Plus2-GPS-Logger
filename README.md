@@ -1,5 +1,5 @@
 # M5StickC Plus2 GPSロガー
-M5StickC Plus2とM5Stack用GPSユニットを用いてGPSデータを取得し、MQTTブローカーへ送信するプログラムです
+M5StickC Plus2とM5Stack用GPSユニットを用いてGPSデータを取得し、MQTTブローカーへ送信し、ブラウザで確認できるようにするプログラムです。
 
 ## 主な機能
 - GPS データ取得 (緯度・経度・高度・時刻)
