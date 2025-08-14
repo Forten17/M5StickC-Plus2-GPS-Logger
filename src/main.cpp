@@ -5,6 +5,7 @@
 #include <PubSubClient.h>
 #include <config.h>
 #include <WebServer.h>
+#include <Preferences.h>
 
 HardwareSerial GPSRaw(2);
 TinyGPSPlus gps;
@@ -12,6 +13,7 @@ WiFiClient wificlient;
 PubSubClient mqttclient(wificlient);
 M5Canvas canvas(&M5.Lcd);
 WebServer server(80);
+Preferences preferences;
 
 int cnt=0; //GPS受信秒数の計測用変数
 
@@ -21,17 +23,17 @@ String password;
 //WiFi接続のタイムアウト管理用関数
 bool connecting = false;
 unsigned long connectStart = 0;
-const unsigned long CONNECT_TIMEOUT = 15000;
+const unsigned long CONNECT_TIMEOUT = 10000;
 
 //GPSデータ更新間隔の管理用関数
 unsigned long lastUpdateTime = 0;
-const long interval = 1000;
+const long interval = 5000;
 
 //MQTT接続のタイムアウト管理用関数
 unsigned long lastMqttReconnectAttempt = 0;
 const long mqttReconnectInterval = 5000;
 
-// --- HTMLファイル群 ---
+// --- HTML群 ---
 // ホームページ
 const char html[] PROGMEM =R"rawliteral(
 <!DOCTYPE html>
@@ -118,7 +120,7 @@ const char html[] PROGMEM =R"rawliteral(
           })
           .catch(error => {
           document.body.innerHTML = 
-          '<h1>送信エラー</h1><p> + 入力内容を確認してください </p>';
+          '<h1>送信エラー</h1><p> 入力内容を確認してください </p>';
           console.error(error);
           });
           });
@@ -203,6 +205,68 @@ const char fail_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
+//APモード立ち上げ処理
+void startAPMode() {
+  Serial.println("[WiFi] Starting AP mode...");
+  M5.Lcd.clear(BLACK);
+  M5.Lcd.setCursor(0, 0);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.printf("WiFi Setup Mode\n");
+  M5.Lcd.printf("Acccess to\n%s\n", AP_SSID);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  delay(100);
+
+  String ip_address = "http://" + WiFi.softAPIP().toString();
+  M5.Lcd.print(ip_address);
+  Serial.printf("[WiFi] AP Started. IP: %s\n", ip_address.c_str());
+  server.begin();
+}
+
+//PreferencesからのWiFi情報読み出しと接続処理
+bool connectToSavedWifi() {
+  preferences.begin("wifi-creds", false);
+
+  // PreferencesからSSIDとパスワードを読み出す
+  String saved_ssid = preferences.getString("ssid", "");
+  String saved_pass = preferences.getString("password", "");
+
+  preferences.end();
+
+  if (saved_ssid.length() > 0) {
+    Serial.printf("[WiFi] Found saved credentials. SSID: %s\n", saved_ssid.c_str());
+    Serial.println("[WiFi] Attempting to connect to saved WiFi...");
+
+    M5.Lcd.clear(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.setTextSize(2);
+    M5.Lcd.printf("Connecting to\n%s", saved_ssid.c_str());
+    
+    WiFi.begin(saved_ssid.c_str(), saved_pass.c_str());
+
+    unsigned long startTime = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+      if (millis() - startTime > 10000) {
+        Serial.println("\n[WiFi] Connection failed (timeout).");
+        M5.Lcd.println("\nFailed!");
+        WiFi.disconnect();
+        return false;
+      }
+      M5.Lcd.print(".");
+      Serial.print(".");
+      delay(500);
+    }
+
+    String ip_address = WiFi.localIP().toString();
+    Serial.printf("\n[WiFi] Connected! IP: %s\n", ip_address.c_str());
+    M5.Lcd.printf("\nConnected!\nIP: %s", ip_address.c_str());
+    ssid = saved_ssid; // 接続成功したSSIDをグローバル変数に保持
+    return true;
+  }
+  
+  Serial.println("[WiFi] No saved credentials found.");
+  return false;
+}
+
 // ---ハンドラ関数群 ---
 // ホームページのハンドラ
 void handleRoot() {
@@ -258,6 +322,20 @@ void handleDone() {
   M5.Lcd.clear(BLACK);
   M5.Lcd.setCursor(0, 0);
   M5.Lcd.printf("Connected to\n%s", ssid.c_str());
+
+  Serial.println("[Preferences] Saving WiFi credentials...");
+  M5.Lcd.println("\nSaving WiFi info...");
+
+  // Preferencesに接続情報を保存
+  preferences.begin("wifi-creds", false);
+  preferences.putString("ssid", ssid);
+  preferences.putString("password", password);
+  preferences.end();
+
+  Serial.println("[Preferences] Credentials saved.");
+  M5.Lcd.println("Saved!");
+  delay(1000); // メッセージ表示のための遅延
+
 }
 
 //接続失敗ページのハンドラ
@@ -277,12 +355,16 @@ void handleNotFound() {
 
 //MQTTクライアントの再接続関数
 void reconnect(){
+  Serial.println("[MQTT] Connecting to MQTT...");
   M5.Lcd.println("\nConnecting to MQTT...");
 
   //接続処理
   if (mqttclient.connect(mqtt_deviceId, mqtt_user, mqtt_password)) {
+    Serial.println("[MQTT] Connected!");
+    Serial.printf("[MQTT] Conntected to %s\n", mqtt_server);
     M5.Lcd.println("MQTT Connected!");
   } else {
+    Serial.printf("[MQTT] Connection failed, rc=%d\n", mqttclient.state());
     M5.Lcd.printf("failed, rc=%d.\nTry again in 5s", mqttclient.state());
   }
 }
@@ -301,20 +383,12 @@ void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   Serial.begin(115200);
+  delay(100);
+  Serial.println("\n\n[System] Starting device...");
   
   //ディスプレイ初期設定
   M5.Lcd.setRotation(1);
-  M5.Lcd.fillScreen(BLACK);
-  M5.Lcd.setTextSize(2);
-  M5.Lcd.setCursor(0,0);
-
-  canvas.setTextWrap(false);
   canvas.createSprite(M5.Lcd.width(), M5.Lcd.height());
-
-  //アクセスポイントモードイベント
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-  M5.Lcd.printf("Acccess to\n%s\n", AP_SSID);
-  M5.Lcd.print("http://" + WiFi.softAPIP().toString());
 
   //エンドポイント設定
   server.on("/", HTTP_GET, handleRoot);         //ホームページへのアクセス時の処理
@@ -323,15 +397,18 @@ void setup() {
   server.on("/done", HTTP_GET, handleDone);     //接続完了時の処理
   server.on("/fail", HTTP_GET, handleFail);     //接続失敗時の処理
   server.onNotFound(handleNotFound);            //未定義のページへのアクセス時の処理
-  server.begin();
+
+  if (!connectToSavedWifi()) {
+    //接続失敗時、APモードを起動する
+    startAPMode();
+  } 
 
   //GPS初期設定
   GPSRaw.begin(115200, SERIAL_8N1, 33, 32);
 
   //MQTT初期設定
   mqttclient.setServer(mqtt_server, 1883);
-
-}
+ }
 
 void loop() {
   //Webサーバークライアントの実行
@@ -339,10 +416,11 @@ void loop() {
 
   //WiFi接続後にMQTTへの接続処理を開始
   if (WiFi.status() == WL_CONNECTED) {
-
+    
     //MQTTとの通信失敗時の再接続処理
     if (!mqttclient.connected()) {
       unsigned long now = millis();
+    
       if (now - lastMqttReconnectAttempt > mqttReconnectInterval) {
         lastMqttReconnectAttempt = now;
         reconnect();
@@ -357,42 +435,46 @@ void loop() {
     if (currentTime - lastUpdateTime >= interval) {
         lastUpdateTime = currentTime;
         
-        char payload[100];
-        char topic[50];
-        char* p_datetime = NULL;
+        char payload[200];
+        char topic[64];
+        const char* p_datetime = NULL;
         
         //GPSデータ取得時のディスプレイ更新
         canvas.setTextSize(2);
         canvas.setCursor(0, 2);
         canvas.printf("### GPS TEST %d\n", cnt++);
+        Serial.println("[GPS] GPS Signal Receiving...");
+
         while (GPSRaw.available() > 0) {
           if(gps.encode(GPSRaw.read())) {
             break;
           }
         }
-
-  if (gps.location.isValid()) {
-    //取得したGPSデータをメモリ描画領域に表示
-    canvas.printf("LAT: %.6f\n", gps.location.lat());
-    canvas.printf("LNG: %.6f\n", gps.location.lng());
-    canvas.printf("ALT: %.2f \n", gps.altitude.meters());
-
-    //GPSデータをメモリに格納
-    p_datetime = gpsDateTime(&gps);
-    snprintf(payload, sizeof(payload), "{\"lat\":\"%.6f\",\"lng\":\"%.6f\",\"alt\":\"%.2f\",\"gpstime\":\"%s\"}", 
-    gps.location.lat(), gps.location.lng(), gps.altitude.meters(), p_datetime);
-
-    //MQTTトピックをメモリに格納
-    snprintf(topic, sizeof(topic), "/%s/%s", mqtt_deviceId, mqtt_topic);
-
-    //MQTT送信
-    mqttclient.publish(topic, payload);
-
-  } else {
-    canvas.print("GPS Signal Lost");
+        
+        if (gps.location.isValid()) {
+          Serial.println("GPS Signal Received!");
+          //取得したGPSデータをメモリ描画領域に表示
+          canvas.printf("LAT: %.6f\n", gps.location.lat());
+          canvas.printf("LNG: %.6f\n", gps.location.lng());
+          canvas.printf("ALT: %.2f \n", gps.altitude.meters());
+          
+          //GPSデータをメモリに格納
+          p_datetime = gpsDateTime(&gps);
+          snprintf(payload, sizeof(payload), "{\"lat\":\"%.6f\",\"lng\":\"%.6f\",\"alt\":\"%.2f\",\"gpstime\":\"%s\"}",
+          gps.location.lat(), gps.location.lng(), gps.altitude.meters(), p_datetime);
+          
+          //MQTTトピックをメモリに格納
+          snprintf(topic, sizeof(topic), "/%s/%s", mqtt_deviceId, mqtt_topic);
+          
+          //MQTT送信
+          mqttclient.publish(topic, payload);
+        
+        } else {
+          canvas.print("GPS Signal Lost");
+        }
+        
+        canvas.pushSprite(&M5.Lcd, 0, 46);
+      }
+    }
   }
-  canvas.pushSprite(&M5.Lcd, 0, 46);
-  }
-}
-}
 }
